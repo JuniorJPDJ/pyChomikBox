@@ -29,11 +29,21 @@ else:
         return d.iteritems()
 
 
-class ChomikSendActionFailedException(Exception):
+class SendActionFailedException(Exception):
+    def __init__(self, action, error=None):
+        self.action, self.error = action, error
+        Exception.__init__(self, '{}: {}'.format(action, error))
+
+
+class NotLoggedInException(Exception):
     pass
 
 
-class ChomikNotLoggedInException(Exception):
+class UnsupportedOperation(Exception):
+    pass
+
+
+class WTFException(Exception):
     pass
 
 
@@ -155,6 +165,21 @@ class ChomikFolder(object):
     def path(self):
         return self.parent_folder.path + self.name + '/'
 
+    def new_folder(self, name):
+        return self.chomik.new_folder(name, self)
+
+    def rename(self, name):
+        self.chomik.rename_folder(name, self)
+
+    def move(self, to):
+        self.chomik.move_folder(self, to)
+
+    def remove(self, force=False):
+        self.chomik.remove_folder(self, force)
+
+    def set_hidden(self, hidden):
+        return self.chomik.set_folder_hidden(self, hidden)
+
 
 class Chomik(ChomikFolder):
     def __init__(self, name, password, requests_session=None):
@@ -177,7 +202,7 @@ class Chomik(ChomikFolder):
         self.logger.debug('Sending action: "{}"'.format(action))
         if action != 'Auth':
             if not self.__token:
-                raise ChomikNotLoggedInException
+                raise NotLoggedInException
             if (datetime.now() - self._last_action).total_seconds() > 300 and action != 'Logout':
                 self.login()
 
@@ -188,13 +213,24 @@ class Chomik(ChomikFolder):
         resp = ChomikSOAP.unpack(resp.text)['{}Response'.format(action)]['{}Result'.format(action)]
         if 'a:hamsterName' in resp and isinstance(resp['a:hamsterName'], ustr):
             self.name = resp['a:hamsterName']
-        if resp['a:status'] != 'Ok':
-            raise ChomikSendActionFailedException(action)
+        if 'a:status' in resp and resp['a:status'] != 'Ok':
+            if isinstance(resp['a:errorMessage'], ustr):
+                raise SendActionFailedException(action, resp['a:errorMessage'])
+            else:
+                raise SendActionFailedException(action)
+        elif 'status' in resp and resp['status']['#text'] != 'Ok':
+            if '#text' in resp['errorMessage']:
+                raise SendActionFailedException(action, resp['errorMessage']['#text'])
+            else:
+                raise SendActionFailedException(action)
         self._last_action = datetime.now()
         self.logger.debug('Action sent: "{}"'.format(action))
         return resp
 
     def login(self):
+        # URL for easy web login:
+        # 'http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox?t={token}&returnUrl=/{name}'.format(self.__token, self.name)
+
         data = OrderedDict([['name', self.name], ['passHash', md5(self.__password.encode('utf-8')).hexdigest()],
                             ['client', {'name': 'chomikbox', 'version': '2.0.8.1'}], ['ver', '4']])
         resp = self._send_action('Auth', data)
@@ -288,8 +324,6 @@ class Chomik(ChomikFolder):
 
         return list(folders_gen(resp))
 
-# http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox?t={token}&returnUrl=/juniorjpdj
-
     def get_path(self, path, case_sensitive=True):
         assert isinstance(path, ustr)
         path = list(filter(None, path.split('/')))
@@ -304,3 +338,58 @@ class Chomik(ChomikFolder):
             if file is None:
                 return
         return file
+
+    def new_folder(self, name, parent_folder=None):
+        assert isinstance(name, ustr)
+        if parent_folder is None:
+            parent_folder = self
+        assert isinstance(parent_folder, ChomikFolder)
+
+        data = OrderedDict([['token', self.__token], ['newFolderId', parent_folder.folder_id], ['name', name]])
+        data = self._send_action('AddFolder', data)
+
+        return ChomikFolder(self, name, data['a:folderId'], parent_folder, False)
+
+    def rename_folder(self, name, folder):
+        assert isinstance(name, ustr)
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['name', name]])
+        self._send_action('RenameFolder', data)
+        folder.name = name
+
+    def move_folder(self, folder, to):
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(to, ChomikFolder)
+        assert isinstance(folder, ChomikFolder)
+
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['newFolderId', to.folder_id]])
+        self._send_action('MoveFolder', data)
+        folder.parent_folder = to
+
+    def remove_folder(self, folder, force=False):
+        assert isinstance(force, bool)
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['force', int(force)]])
+        self._send_action('RemoveFolder', data)
+        folder.parent_folder = None
+
+    def set_folder_hidden(self, folder, hidden):
+        assert isinstance(hidden, bool)
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['hidden', int(hidden)]])
+        data = self._send_action('ModifyFolder', data)
+        data = data['a:folderDetails']['hidden']
+        data = True if data == 'true' else False
+
+        folder.hidden = data
+        return hidden == data
