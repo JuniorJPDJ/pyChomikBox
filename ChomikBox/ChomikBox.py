@@ -1,5 +1,6 @@
 from __future__ import unicode_literals
 
+from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
 from .httpio_requests import SeekableHTTPFile
 from collections import OrderedDict
 from datetime import datetime
@@ -8,6 +9,7 @@ import xmltodict
 import requests
 import logging
 import sys
+import io
 
 if sys.version_info >= (3, 0):
     # noinspection PyUnresolvedReferences
@@ -40,6 +42,10 @@ class NotLoggedInException(Exception):
 
 
 class UnsupportedOperation(Exception):
+    pass
+
+
+class UploadException(Exception):
     pass
 
 
@@ -179,6 +185,9 @@ class ChomikFolder(object):
 
     def set_hidden(self, hidden):
         return self.chomik.set_folder_hidden(self, hidden)
+
+    def upload_file(self, file_like_obj, name=None, progress_callback=None):
+        return self.chomik.upload_file(file_like_obj, name, progress_callback, self)
 
 
 class Chomik(ChomikFolder):
@@ -393,3 +402,39 @@ class Chomik(ChomikFolder):
 
         folder.hidden = data
         return hidden == data
+
+    def upload_file(self, file_like_obj, name=None, progress_callback=None, folder=None):
+        if name is None:
+            name = file_like_obj.name
+        if folder is None:
+            folder = self
+        if progress_callback is None:
+            progress_callback = lambda monitor: None
+        assert isinstance(file_like_obj, (io.IOBase, getattr(__builtins__, 'file', io.BufferedReader)))
+        assert isinstance(name, ustr)
+        assert isinstance(folder, ChomikFolder)
+        assert callable(progress_callback)
+
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['fileName', name]])
+        data = self._send_action('UploadToken', data)
+
+        key, stamp, server = data['a:key'], data['a:stamp'], data['a:server']
+
+        data = {'chomik_id': ustr(self.chomik_id), 'folder_id': ustr(folder.folder_id), 'key': key,
+                'time': stamp, 'locale': 'PL', 'client': 'ChomikBox-2.0.8.1', 'file': (name, file_like_obj)}
+        monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=progress_callback)
+        headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
+        self.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=name, f=folder.folder_id))
+        resp = self.sess.post('http://{server}/file/'.format(server=server), data=monitor, headers=headers)
+        self.logger.debug('Upload of file "{n}" finished'.format(n=name))
+
+        resp = xmltodict.parse(resp.content)['resp']
+        if resp['@res'] != '1':
+            if '@errorMessage' in resp:
+                raise UploadException(resp['@res'], resp['@errorMessage'])
+            else:
+                raise UploadException(resp['@res'])
+        if '@fileid' not in resp:
+            raise UploadException
+
+        return resp['@fileid']
