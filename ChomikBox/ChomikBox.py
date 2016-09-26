@@ -2,6 +2,7 @@ from __future__ import unicode_literals
 
 from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
 from .httpio_requests import SeekableHTTPFile
+from .PartFile import PartFile, total_len
 from collections import OrderedDict
 from datetime import datetime
 from hashlib import md5
@@ -9,7 +10,6 @@ import xmltodict
 import requests
 import logging
 import sys
-import io
 
 if sys.version_info >= (3, 0):
     # noinspection PyUnresolvedReferences
@@ -28,6 +28,7 @@ else:
         return s.lower()
 
     def dict_iteritems(d):
+        # noinspection PyCompatibility
         return d.iteritems()
 
 
@@ -69,6 +70,7 @@ class ChomikSOAP(object):
         return data['s:Envelope']['s:Body']
 
 
+# TODO: move, rename, remove
 class ChomikFile(object):
     def __init__(self, chomik, name, file_id, parent_folder, url=None):
         assert isinstance(chomik, Chomik)
@@ -83,9 +85,8 @@ class ChomikFile(object):
         return '<ChomikBox.ChomikFile: "{p}" {i}({c})>'.format(p=self.path, i='-not downloadable- ' if self.downloadable else ' ', c=self.chomik.name)
 
     def open(self):
-        if self.url is None:
-            return
-        return SeekableHTTPFile(self.url, repeat_time=None, requests_session=self.chomik.sess)
+        if self.downloadable:
+            return SeekableHTTPFile(self.url, repeat_time=None, requests_session=self.chomik.sess)
 
     @property
     def downloadable(self):
@@ -236,6 +237,7 @@ class Chomik(ChomikFolder):
         self.logger.debug('Action sent: "{}"'.format(action))
         return resp
 
+    # TODO: web login (for some actions that chomikbox can't do)
     def login(self):
         # URL for easy web login:
         # 'http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox?t={token}&returnUrl=/{name}'.format(self.__token, self.name)
@@ -250,6 +252,7 @@ class Chomik(ChomikFolder):
     def logout(self):
         self._send_action('Logout', {'token': self.__token})
         self.__token = ''
+        self.logger.debug('Logged out')
 
     @property
     def path(self):
@@ -354,6 +357,7 @@ class Chomik(ChomikFolder):
             parent_folder = self
         assert isinstance(parent_folder, ChomikFolder)
 
+        self.logger.debug('Creating new folder "{n}" in {f}'.format(n=name, f=parent_folder.folder_id))
         data = OrderedDict([['token', self.__token], ['newFolderId', parent_folder.folder_id], ['name', name]])
         data = self._send_action('AddFolder', data)
 
@@ -365,6 +369,7 @@ class Chomik(ChomikFolder):
             raise UnsupportedOperation
         assert isinstance(folder, ChomikFolder)
 
+        self.logger.debug('Renaming folder {f} to {n}'.format(f=folder.folder_id, n=name))
         data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['name', name]])
         self._send_action('RenameFolder', data)
         folder.name = name
@@ -375,6 +380,7 @@ class Chomik(ChomikFolder):
         assert isinstance(to, ChomikFolder)
         assert isinstance(folder, ChomikFolder)
 
+        self.logger.debug('Moving folder {f} to {tf}'.format(f=folder.folder_id, tf=to.folder_id))
         data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['newFolderId', to.folder_id]])
         self._send_action('MoveFolder', data)
         folder.parent_folder = to
@@ -385,9 +391,11 @@ class Chomik(ChomikFolder):
             raise UnsupportedOperation
         assert isinstance(folder, ChomikFolder)
 
+        self.logger.debug('Removing folder {f}'.format(f=folder.folder_id))
         data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['force', int(force)]])
         self._send_action('RemoveFolder', data)
         folder.parent_folder = None
+        del(self._folder_cache[folder.folder_id])
 
     def set_folder_hidden(self, folder, hidden):
         assert isinstance(hidden, bool)
@@ -395,13 +403,18 @@ class Chomik(ChomikFolder):
             raise UnsupportedOperation
         assert isinstance(folder, ChomikFolder)
 
+        self.logger.debug('Setting folder {f} hidden status to {h}'.format(f=folder.folder_id, h=hidden))
         data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['hidden', int(hidden)]])
         data = self._send_action('ModifyFolder', data)
         data = data['a:folderDetails']['hidden']
         data = True if data == 'true' else False
 
         folder.hidden = data
-        return hidden == data
+        if hidden == data:
+            folder.hidden = hidden
+            return True
+        else:
+            return False
 
     def upload_file(self, file_like_obj, name=None, progress_callback=None, folder=None):
         if name is None:
@@ -410,31 +423,134 @@ class Chomik(ChomikFolder):
             folder = self
         if progress_callback is None:
             progress_callback = lambda monitor: None
-        assert isinstance(file_like_obj, (io.IOBase, getattr(__builtins__, 'file', io.BufferedReader)))
         assert isinstance(name, ustr)
         assert isinstance(folder, ChomikFolder)
-        assert callable(progress_callback)
 
+        self.logger.debug('Getting file upload data for file "{n}" in folder {f}'.format(n=name, f=folder.folder_id))
         data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['fileName', name]])
         data = self._send_action('UploadToken', data)
 
         key, stamp, server = data['a:key'], data['a:stamp'], data['a:server']
 
-        data = {'chomik_id': ustr(self.chomik_id), 'folder_id': ustr(folder.folder_id), 'key': key,
-                'time': stamp, 'locale': 'PL', 'client': 'ChomikBox-2.0.8.1', 'file': (name, file_like_obj)}
-        monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=progress_callback)
+        return ChomikUploader(self, folder, file_like_obj, name, server, key, stamp, progress_callback)
+
+
+class ChomikUploader(object):
+    class UploadPaused(Exception):
+        pass
+
+    def __init__(self, chomik, folder, file, name, server, key, stamp, progress_callback=None):
+        assert hasattr(file, 'read') and hasattr(file, 'tell') and hasattr(file, 'seek')
+        assert isinstance(folder, ChomikFolder)
+        assert callable(progress_callback)
+        assert isinstance(chomik, Chomik)
+        assert isinstance(name, ustr)
+        assert isinstance(server, ustr)
+        assert isinstance(key, ustr)
+        assert isinstance(stamp, ustr)
+
+        self.chomik, self.folder, self.file, self.name = chomik, folder, file, name
+        self.server, self.key, self.stamp = server, key, stamp
+        self.paused, self.finished, self.started = False, False, False
+        self.upload_size, self.bytes_uploaded = total_len(file), 0
+        self.__start_pos, self.__part_size = 0, self.upload_size
+        self.progress_callback = progress_callback
+
+    def __callback(self, monitor):
+        self.bytes_uploaded = self.__start_pos + (monitor.bytes_read - (monitor.len - self.__part_size))
+        if self.progress_callback is not None:
+            self.progress_callback(self)
+        if self.paused:
+            raise self.UploadPaused
+
+    def pause(self):
+        self.paused = True
+
+    def start(self, attempts=0):
+        # attempts = -1 for infinite
+        assert isinstance(attempts, int)
+
+        if self.finished:
+            raise UploadException('Tried to start finished upload')
+        if self.started:
+            raise UploadException('Tried to start already started upload')
+        self.started = True
+
+        data = OrderedDict([['chomik_id', ustr(self.chomik.chomik_id)], ['folder_id', ustr(self.folder.folder_id)],
+                            ['key', self.key], ['time', self.stamp], ['client', 'ChomikBox-2.0.8.1'], ['locale', 'PL'],
+                            ['file', (self.name, self.file)]])
+        monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
         headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
-        self.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=name, f=folder.folder_id))
-        resp = self.sess.post('http://{server}/file/'.format(server=server), data=monitor, headers=headers)
-        self.logger.debug('Upload of file "{n}" finished'.format(n=name))
 
-        resp = xmltodict.parse(resp.content)['resp']
-        if resp['@res'] != '1':
-            if '@errorMessage' in resp:
-                raise UploadException(resp['@res'], resp['@errorMessage'])
+        try:
+            self.chomik.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=self.name, f=self.folder.folder_id))
+            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
+        except Exception as e:
+            if isinstance(e, self.UploadPaused):
+                self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
+                return 'paused'
             else:
-                raise UploadException(resp['@res'])
-        if '@fileid' not in resp:
-            raise UploadException
+                self.chomik.logger.debug('Error {e} occurred during upload of file "{n}"'.format(e=e, n=self.name))
+                attempt = 1
+                while attempts >= attempt or attempts == -1:
+                    try:
+                        self.chomik.logger.debug('Resuming failed upload of file "{n}"'.format(n=self.name))
+                        return self.resume()
+                    except Exception as ex:
+                        e = ex
+                        self.chomik.logger.debug('Error {e} occurred during upload of file "{n}"'.format(e=ex, n=self.name))
+                        attempt += 1
+                else:
+                    raise e
+        else:
+            self.chomik.logger.debug('Upload of file "{n}" finished'.format(n=self.name))
+            resp = xmltodict.parse(resp.content)['resp']
+            if resp['@res'] != '1':
+                if '@errorMessage' in resp:
+                    raise UploadException(resp['@res'], resp['@errorMessage'])
+                else:
+                    raise UploadException(resp['@res'])
+            if '@fileid' not in resp:
+                raise UploadException
 
-        return resp['@fileid']
+            return resp['@fileid']
+
+    def resume(self):
+        if self.finished:
+            raise UploadException('Tried to resume finished upload')
+        self.paused = False
+
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = self.chomik.sess.get('http://{server}/resume/check/?key={key}'.format(server=self.server, key=self.key), headers=headers)
+        resp = xmltodict.parse(resp.content)['resp']
+
+        resume_from = int(resp['@file_size'])
+        part = PartFile(self.file, resume_from)
+        self.__start_pos = resume_from
+        self.__part_size = part.len
+
+        data = OrderedDict([['chomik_id', ustr(self.chomik.chomik_id)], ['folder_id', ustr(self.folder.folder_id)],
+                            ['key', self.key], ['time', self.stamp], ['resume_from', ustr(resume_from)],
+                            ['client', 'ChomikBox-2.0.8.1'], ['locale', 'PL'], ['file', (self.name, part)]])
+        monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
+        headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
+
+        self.chomik.logger.debug('Resumed uploading file "{n}" to folder {f} from {b} bytes'.format(n=self.name, f=self.folder.folder_id, b=resume_from))
+        try:
+            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
+        except self.UploadPaused:
+            self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
+            return 'paused'
+        else:
+            self.chomik.logger.debug('Upload of file "{n}" finished'.format(n=self.name))
+
+            resp = xmltodict.parse(resp.content)['resp']
+            if resp['@res'] != '1':
+                if '@errorMessage' in resp:
+                    raise UploadException(resp['@res'], resp['@errorMessage'])
+                else:
+                    raise UploadException(resp['@res'])
+            if '@fileid' not in resp:
+                raise UploadException
+
+            return resp['@fileid']

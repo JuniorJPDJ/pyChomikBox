@@ -7,6 +7,7 @@ from io import IOBase
 # Modified to use requests by JuniorJPDJ
 
 
+# TODO: caching some data (downloading more than read) for better performance in reading in small chunks
 class SeekableHTTPFile(IOBase):
     def __init__(self, url, name=None, repeat_time=15, debug=False, requests_session=None):
         """Allow a file accessible via HTTP to be used like a local file by utilities
@@ -39,6 +40,8 @@ class SeekableHTTPFile(IOBase):
         self.content_length = int(f.headers["Content-Length"]) if "Content-Length" in f.headers else -1
         if self.content_length < 0:
             self._seekable = False
+        else:
+            self.len = self.content_length
         if "Accept-Ranges" not in f.headers or f.headers["Accept-Ranges"] != "bytes":
             ff = self._urlopen((0, 1), method='HEAD')
             if ff.status_code != 206:
