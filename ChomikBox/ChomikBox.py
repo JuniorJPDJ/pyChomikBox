@@ -1,15 +1,20 @@
 from __future__ import unicode_literals
 
-from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
-from .httpio_requests import SeekableHTTPFile
-from .PartFile import PartFile, total_len
-from collections import OrderedDict
-from datetime import datetime
-from hashlib import md5
-import xmltodict
-import requests
 import logging
 import sys
+from collections import OrderedDict
+from contextlib import closing
+from datetime import datetime
+from hashlib import md5
+
+import requests
+import xmltodict
+from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
+
+from .PartFile import PartFile, total_len
+from .utils.SeekableHTTPFile import SeekableHTTPFile
+
+# TODO: speed limits for downloader and uploader
 
 if sys.version_info >= (3, 0):
     # noinspection PyUnresolvedReferences
@@ -82,19 +87,22 @@ class ChomikFile(object):
         self.parent_folder, self.url = parent_folder, url
 
     def __repr__(self):
-        return '<ChomikBox.ChomikFile: "{p}" {i}({c})>'.format(p=self.path, i='-not downloadable- ' if self.downloadable else ' ', c=self.chomik.name)
+        return '<ChomikBox.ChomikFile: "{p}"{i}({c})>'.format(p=self.path, i=' ' if self.downloadable else '-not downloadable- ', c=self.chomik.name)
 
     def open(self):
         if self.downloadable:
-            return SeekableHTTPFile(self.url, repeat_time=None, requests_session=self.chomik.sess)
+            return SeekableHTTPFile(self.url, self.name, self.chomik.sess)
 
     @property
     def downloadable(self):
-        return self.url is None
+        return self.url is not None
 
     @property
     def path(self):
         return self.parent_folder.path + self.name
+
+    def download(self, file_like, progress_callback):
+        return ChomikDownloader(self.chomik, self, file_like, progress_callback)
 
 
 class ChomikFolder(object):
@@ -513,6 +521,7 @@ class ChomikUploader(object):
             if '@fileid' not in resp:
                 raise UploadException
 
+            self.finished = True
             return resp['@fileid']
 
     def resume(self):
@@ -553,4 +562,59 @@ class ChomikUploader(object):
             if '@fileid' not in resp:
                 raise UploadException
 
+            self.finished = True
             return resp['@fileid']
+
+
+class ChomikDownloader(object):
+    def __init__(self, chomik, chomik_file, save_file, progress_callback=None, chunk_size=8192):
+        assert isinstance(chomik, Chomik)
+        assert isinstance(chomik_file, ChomikFile)
+        assert hasattr(save_file, 'write')
+        assert isinstance(chunk_size, int)
+        assert chomik_file.downloadable
+
+        self.chomik, self.chomik_file, self.save_file, self.chunk_size = chomik, chomik_file, save_file, chunk_size
+        self.paused, self.finished, self.started, self.bytes_downloaded = False, False, False, 0
+        self.download_size = int(self.chomik.sess.head(chomik_file.url).headers["Content-Length"])
+        self.progress_callback = progress_callback
+
+    @property
+    def name(self):
+        return self.chomik_file.name
+
+    def pause(self):
+        self.paused = True
+
+    def __dwn(self, headers):
+        with closing(self.chomik.sess.get(self.chomik_file.url, stream=True, headers=headers)) as resp:
+            if resp.status_code in (200, 206):
+                for data in resp.iter_content(self.chunk_size):
+                    self.save_file.write(data)
+                    self.bytes_downloaded += len(data)
+                    if self.progress_callback is not None:
+                        self.progress_callback(self)
+                    if self.paused:
+                        return 'paused'
+                self.finished = True
+                return True
+            else:
+                return False
+
+    def start(self):
+        if self.finished:
+            raise UploadException('Tried to start finished download')
+        if self.started:
+            raise UploadException('Tried to start already started download')
+        self.started = True
+
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        return self.__dwn(headers)
+
+    def resume(self):
+        if self.finished:
+            raise UploadException('Tried to resume finished download')
+        self.paused = False
+
+        headers = {'User-Agent': 'Mozilla/5.0', 'Range': 'bytes={}-'.format(self.bytes_downloaded)}
+        return self.__dwn(headers)

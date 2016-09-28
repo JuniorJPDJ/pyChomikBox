@@ -22,11 +22,13 @@ def total_len(o):
         # e.g. BytesIO, cStringIO.StringIO
         return len(o.getvalue())
 
-    if o.seekable():
+    try:
         current_pos = o.tell()
         length = o.seek(0, 2)
         o.seek(current_pos, 0)
         return length
+    except IOError:
+        pass
 
 
 class PartFile(io.IOBase):
@@ -40,8 +42,10 @@ class PartFile(io.IOBase):
 
         io.IOBase.__init__(self)
 
-        if self.seekable():
+        try:
             self.seek(0)
+        except:
+            pass
 
     def seek(self, offset, whence=0):
         if whence == 0:
