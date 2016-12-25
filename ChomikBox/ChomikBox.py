@@ -110,7 +110,7 @@ class ChomikFile(object):
     def remove(self):
         return self.chomik.remove_file(self)
 
-    def download(self, file_like, progress_callback):
+    def download(self, file_like, progress_callback=None):
         return ChomikDownloader(self.chomik, self, file_like, progress_callback)
 
 
