@@ -9,6 +9,7 @@ from hashlib import md5
 
 import requests
 import xmltodict
+import os.path
 from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
 
 from .PartFile import PartFile, total_len
@@ -75,7 +76,6 @@ class ChomikSOAP(object):
         return data['s:Envelope']['s:Body']
 
 
-# TODO: move, rename, remove
 class ChomikFile(object):
     def __init__(self, chomik, name, file_id, parent_folder, url=None):
         assert isinstance(chomik, Chomik)
@@ -101,32 +101,45 @@ class ChomikFile(object):
     def path(self):
         return self.parent_folder.path + self.name
 
-    def download(self, file_like, progress_callback):
+    def rename(self, name, description):
+        return self.chomik.rename_file(name, description, self)
+
+    def move(self, toFolder):
+        return self.chomik.move_file(self, toFolder)
+
+    def remove(self):
+        return self.chomik.remove_file(self)
+
+    def download(self, file_like, progress_callback=None):
         return ChomikDownloader(self.chomik, self, file_like, progress_callback)
 
 
 class ChomikFolder(object):
-    def __init__(self, chomik, name, folder_id, parent_folder, hidden):
+    def __init__(self, chomik, name, folder_id, parent_folder, hidden, adult, gallery_view):
         assert isinstance(chomik, Chomik)
         assert isinstance(name, ustr)
         assert isinstance(parent_folder, ChomikFolder) or parent_folder is None
         assert isinstance(hidden, bool)
+        assert isinstance(adult, bool)
+        assert isinstance(gallery_view, bool)
 
         self.chomik, self.folder_id, self.name = chomik, int(folder_id), name
-        self.parent_folder, self.hidden = parent_folder, hidden
+        self.parent_folder, self.hidden, self.adult, self.gallery_view = parent_folder, hidden, adult, gallery_view
 
     @classmethod
-    def cache(cls, chomik, name, folder_id, parent_folder, hidden):
+    def cache(cls, chomik, name, folder_id, parent_folder, hidden, adult, gallery_view):
         assert isinstance(chomik, Chomik)
         folder_id = int(folder_id)
         if folder_id in chomik._folder_cache:
             assert isinstance(name, ustr)
             assert isinstance(parent_folder, ChomikFolder)
             assert isinstance(hidden, bool)
+            assert isinstance(adult, bool)
+            assert isinstance(gallery_view, bool)
             fol = chomik._folder_cache[folder_id]
-            fol.name, fol.parent_folder, fol.hidden = name, parent_folder, hidden
+            fol.name, fol.parent_folder, fol.hidden, fol.adult, fol.gallery_view = name, parent_folder, hidden, adult, gallery_view
         else:
-            fol = cls(chomik, name, folder_id, parent_folder, hidden)
+            fol = cls(chomik, name, folder_id, parent_folder, hidden, adult, gallery_view)
             chomik._folder_cache[folder_id] = fol
         return fol
 
@@ -195,6 +208,12 @@ class ChomikFolder(object):
     def set_hidden(self, hidden):
         return self.chomik.set_folder_hidden(self, hidden)
 
+    def set_adult(self, adult):
+        return self.chomik.set_folder_adult(self, adult)
+
+    def set_gallery_view(self, gallery_view):
+        return self.chomik.set_folder_gallery_view(self, gallery_view)
+
     def upload_file(self, file_like_obj, name=None, progress_callback=None):
         return self.chomik.upload_file(file_like_obj, name, progress_callback, self)
 
@@ -211,7 +230,8 @@ class Chomik(ChomikFolder):
         self._last_action = datetime.now()
         self._folder_cache = {}
         self.logger = logging.getLogger('ChomikBox.Chomik.{}'.format(name))
-        ChomikFolder.__init__(self, self, name, 0, None, False)
+        # TODO: init adult & gallery_view properly
+        ChomikFolder.__init__(self, self, name, 0, None, False, False, False)
 
     def __repr__(self):
         return '<ChomikBox.Chomik: {n}>'.format(n=self.name)
@@ -245,17 +265,26 @@ class Chomik(ChomikFolder):
         self.logger.debug('Action sent: "{}"'.format(action))
         return resp
 
-    # TODO: web login (for some actions that chomikbox can't do)
-    def login(self):
-        # URL for easy web login:
-        # 'http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox?t={token}&returnUrl=/{name}'.format(self.__token, self.name)
+    def _send_web_action(self, action, data):
+        self.logger.debug('Sending web action: "{}"'.format(action))
+        headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded', 'Accept-Language': 'en-US,*'}
+        resp = self.sess_web.post('http://chomikuj.pl/action/{}'.format(action), data=data, headers=headers)
+        try:
+            return resp.json()['IsSuccess']
+        except ValueError:
+            return False
 
+    def login(self):
         data = OrderedDict([['name', self.name], ['passHash', md5(self.__password.encode('utf-8')).hexdigest()],
                             ['client', {'name': 'chomikbox', 'version': '2.0.8.1'}], ['ver', '4']])
         resp = self._send_action('Auth', data)
         self.chomik_id = int(resp['a:hamsterId'])
         self.__token = resp['a:token']
         self.logger.debug('Logged in with token {}'.format(self.__token))
+
+        # Web login
+        self.sess_web = requests.session()
+        self.sess_web.get('http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox', params={'t':self.__token, 'returnUrl':self.name})
 
     def logout(self):
         self._send_action('Logout', {'token': self.__token})
@@ -326,7 +355,9 @@ class Chomik(ChomikFolder):
 
         def folder_(data):
             hidden = True if data['hidden'] == 'true' else False
-            return ChomikFolder.cache(self, data['name'], data['id'], folder, hidden)
+            adult = True if data['adult'] == 'true' else False
+            gallery_view = True if data['view']['gallery'] == 'true' else False
+            return ChomikFolder.cache(self, data['name'], data['id'], folder, hidden, adult, gallery_view)
 
         def folders_gen(data):
             if 'FolderInfo' in data:
@@ -369,7 +400,7 @@ class Chomik(ChomikFolder):
         data = OrderedDict([['token', self.__token], ['newFolderId', parent_folder.folder_id], ['name', name]])
         data = self._send_action('AddFolder', data)
 
-        return ChomikFolder(self, name, data['a:folderId'], parent_folder, False)
+        return ChomikFolder(self, name, data['a:folderId'], parent_folder, False, False, False)
 
     def rename_folder(self, name, folder):
         assert isinstance(name, ustr)
@@ -423,6 +454,99 @@ class Chomik(ChomikFolder):
             return True
         else:
             return False
+
+    def set_folder_gallery_view(self, folder, gallery_view):
+        assert isinstance(gallery_view, bool)
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+
+        self.logger.debug('Setting folder {f} gallery_view status to {h}'.format(f=folder.folder_id, h=gallery_view))
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['view', OrderedDict([('gallery', int(gallery_view))])]])
+        data = self._send_action('ModifyFolder', data)
+        data = data['a:folderDetails']['view']['gallery']
+        data = True if data == 'true' else False
+
+        folder.gallery_view = data
+        if gallery_view == data:
+            folder.gallery_view = gallery_view
+            return True
+        else:
+            return False
+
+    # TODO: set (cached?) child folders adult param (chomikuj do this)
+    def set_folder_adult(self, folder, adult):
+        assert isinstance(adult, bool)
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+
+        self.logger.debug('Setting folder {f} adult status to {h}'.format(f=folder.folder_id, h=adult))
+        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['adult', int(adult)]])
+        data = self._send_action('ModifyFolder', data)
+        data = data['a:folderDetails']['adult']
+        data = True if data == 'true' else False
+
+        folder.adult = data
+        if adult == data:
+            folder.adult = adult
+            return True
+        else:
+            return False
+
+    def rename_file(self, name, description, file):
+        assert isinstance(name, ustr)
+        assert isinstance(description, ustr)
+        assert isinstance(file, ChomikFile)
+
+        if name == '':
+            return False
+
+        # Cut extension
+        name = os.path.splitext(name)[0]
+
+        self.logger.debug('Renaming file {f} to {n}'.format(f=file.file_id, n=name))
+        data = {
+            'FileId':      file.file_id,
+            'Name':        name,
+            'Description': description
+        }
+        if self._send_web_action('FileDetails/EditNameAndDescAction', data):
+            file.name = name + os.path.splitext(file.name)[1]
+            return True
+        return False
+
+    def move_file(self, file, toFolder):
+        assert isinstance(file, ChomikFile)
+        assert isinstance(toFolder, ChomikFolder)
+
+        self.logger.debug('Moving file {f} to {tf}'.format(f=file.file_id, tf=toFolder.folder_id))
+        data = {
+            'ChomikId': self.chomik_id,
+            'FolderId': file.parent_folder.folder_id,
+            'FileId':   file.file_id,
+            'FolderTo': toFolder.folder_id
+        }
+        if self._send_web_action('FileDetails/MoveFileAction', data):
+            file.parent_folder = toFolder
+            return True
+        return False
+
+    def remove_file(self, file):
+        assert isinstance(file, ChomikFile)
+
+        self.logger.debug('Removing file {f}'.format(f=file.file_id))
+        data = {
+            'ChomikId': self.chomik_id,
+            'FolderId': file.parent_folder.folder_id,
+            'FileId':   file.file_id,
+            'FolderTo': 0
+        }
+        if self._send_web_action('FileDetails/DeleteFileAction', data):
+            del(file)
+            return True
+        return False
+
 
     def upload_file(self, file_like_obj, name=None, progress_callback=None, folder=None):
         if name is None:
