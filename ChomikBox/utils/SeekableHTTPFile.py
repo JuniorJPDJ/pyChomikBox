@@ -59,7 +59,6 @@ class SeekableHTTPFile(IOBase):
         elif whence == 2:
             self._pos = self.len
         self._pos += offset
-        self._reopen_stream()
         if self._r is not None:
             self._r.close()
         elif hasattr(self._r, 'raw'):
