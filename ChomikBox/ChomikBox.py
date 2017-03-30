@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime
 from hashlib import md5
 
+import re
 import requests
 import xmltodict
 import os.path
@@ -14,6 +15,8 @@ from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
 
 from .PartFile import PartFile, total_len
 from .utils.SeekableHTTPFile import SeekableHTTPFile
+
+CHOMIKBOX_VERSION = '2.0.8.2'
 
 # TODO: speed limits for downloader and uploader
 
@@ -226,7 +229,7 @@ class Chomik(ChomikFolder):
 
         self.__password = password
         self.sess = requests.session() if requests_session is None else requests_session
-        self.__token, self.chomik_id = '', 0
+        self.__token, self.chomik_id, self.chomik_id2 = '', 0, 0
         self._last_action = datetime.now()
         self._folder_cache = {}
         self.logger = logging.getLogger('ChomikBox.Chomik.{}'.format(name))
@@ -270,17 +273,20 @@ class Chomik(ChomikFolder):
         headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded', 'Accept-Language': 'en-US,*'}
         resp = self.sess_web.post('http://chomikuj.pl/action/{}'.format(action), data=data, headers=headers)
         try:
-            return resp.json()['IsSuccess']
+            return resp.json()
         except ValueError:
             return False
 
     def login(self):
         data = OrderedDict([['name', self.name], ['passHash', md5(self.__password.encode('utf-8')).hexdigest()],
-                            ['client', {'name': 'chomikbox', 'version': '2.0.8.1'}], ['ver', '4']])
+                            ['client', {'name': 'chomikbox', 'version': CHOMIKBOX_VERSION}], ['ver', '4']])
         resp = self._send_action('Auth', data)
         self.chomik_id = int(resp['a:hamsterId'])
         self.__token = resp['a:token']
         self.logger.debug('Logged in with token {}'.format(self.__token))
+
+        # Tell them we are alive (required to obtain ID for files listing)
+        self.ping()
 
         # Web login
         self.sess_web = requests.session()
@@ -291,6 +297,22 @@ class Chomik(ChomikFolder):
         self.__token = ''
         self.logger.debug('Logged out')
 
+    def ping(self):
+        # TODO: maybe send real data here?
+        stats = OrderedDict([
+            ('isUploading', 0),
+            ('isPlaying', 0),
+            ('isDownloading', 0),
+            ('panelSelectedTab', 0),
+            ('animation', 0)
+        ])
+        data = OrderedDict([['token', self.__token], ['stats', stats]])
+        try:
+            self._send_action('CheckEvents', data)
+        except KeyError:
+            # This can happen if we send too much data in so quick time, nothing to worry about
+            pass
+
     @property
     def path(self):
         return '/'
@@ -299,6 +321,20 @@ class Chomik(ChomikFolder):
         if folder is None:
             folder = self
         assert isinstance(folder, ChomikFolder)
+
+        if not self.chomik_id2:
+            # Obtain different account ID
+            # TODO/Warning: to get proper response, we need be logged in and send ping, which
+            # is done currently after login. If this method ever fail in future, just call ping() here.
+            data = {
+                'chomikName': self.name,
+                'folderId': folder.folder_id
+            }
+            resp = self._send_web_action('chomikbox/DownloadFolderChomikBox', data)
+
+            # chomik://files/:chomik_id/folder_id
+            r = re.match('chomik:\/\/files\/:(\d+)\/\d+', resp['chomikBoxUrl'])
+            self.chomik_id2 = int(r.group(1))
 
         free_files = {}
 
@@ -327,7 +363,7 @@ class Chomik(ChomikFolder):
         def dwn_req_data(data):
             return OrderedDict([['token', self.__token], ['sequence', {'stamp': 0, 'part': 0, 'count': 1}], ['disposition', 'download'], ['list', {'DownloadReqEntry': data}]])
 
-        id_ = '{}/{}'.format(self.chomik_id, folder.folder_id)
+        id_ = '{}/{}'.format(self.chomik_id2, folder.folder_id)
         a_data = dwn_req_data(OrderedDict([['id', id_], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
         self.logger.debug('Loading files from folder {id}'.format(id=folder.folder_id))
         resp = self._send_action('Download', a_data)
@@ -511,7 +547,8 @@ class Chomik(ChomikFolder):
             'Name':        name,
             'Description': description
         }
-        if self._send_web_action('FileDetails/EditNameAndDescAction', data):
+        resp = self._send_web_action('FileDetails/EditNameAndDescAction', data)
+        if resp and resp['IsSuccess']:
             file.name = name + os.path.splitext(file.name)[1]
             return True
         return False
@@ -522,12 +559,13 @@ class Chomik(ChomikFolder):
 
         self.logger.debug('Moving file {f} to {tf}'.format(f=file.file_id, tf=toFolder.folder_id))
         data = {
-            'ChomikId': self.chomik_id,
+            'ChomikName': self.name,
             'FolderId': file.parent_folder.folder_id,
             'FileId':   file.file_id,
             'FolderTo': toFolder.folder_id
         }
-        if self._send_web_action('FileDetails/MoveFileAction', data):
+        resp = self._send_web_action('FileDetails/MoveFileAction', data)
+        if resp and resp['IsSuccess']:
             file.parent_folder = toFolder
             return True
         return False
@@ -537,12 +575,13 @@ class Chomik(ChomikFolder):
 
         self.logger.debug('Removing file {f}'.format(f=file.file_id))
         data = {
-            'ChomikId': self.chomik_id,
+            'ChomikName': self.name,
             'FolderId': file.parent_folder.folder_id,
             'FileId':   file.file_id,
             'FolderTo': 0
         }
-        if self._send_web_action('FileDetails/DeleteFileAction', data):
+        resp = self._send_web_action('FileDetails/DeleteFileAction', data)
+        if resp and resp['IsSuccess']:
             del(file)
             return True
         return False
@@ -609,7 +648,7 @@ class ChomikUploader(object):
         self.started = True
 
         data = OrderedDict([['chomik_id', ustr(self.chomik.chomik_id)], ['folder_id', ustr(self.folder.folder_id)],
-                            ['key', self.key], ['time', self.stamp], ['client', 'ChomikBox-2.0.8.1'], ['locale', 'PL'],
+                            ['key', self.key], ['time', self.stamp], ['client', 'ChomikBox-'+CHOMIKBOX_VERSION], ['locale', 'PL'],
                             ['file', (self.name, self.file)]])
         monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
         headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
@@ -664,7 +703,7 @@ class ChomikUploader(object):
 
         data = OrderedDict([['chomik_id', ustr(self.chomik.chomik_id)], ['folder_id', ustr(self.folder.folder_id)],
                             ['key', self.key], ['time', self.stamp], ['resume_from', ustr(resume_from)],
-                            ['client', 'ChomikBox-2.0.8.1'], ['locale', 'PL'], ['file', (self.name, part)]])
+                            ['client', 'ChomikBox-'+CHOMIKBOX_VERSION], ['locale', 'PL'], ['file', (self.name, part)]])
         monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
         headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
 
