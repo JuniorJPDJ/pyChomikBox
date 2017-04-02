@@ -285,9 +285,6 @@ class Chomik(ChomikFolder):
         self.__token = resp['a:token']
         self.logger.debug('Logged in with token {}'.format(self.__token))
 
-        # Tell them we are alive (required to obtain ID for files listing)
-        self.ping()
-
         # Web login
         self.sess_web = requests.session()
         self.sess_web.get('http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox', params={'t':self.__token, 'returnUrl':self.name})
@@ -297,22 +294,6 @@ class Chomik(ChomikFolder):
         self.__token = ''
         self.logger.debug('Logged out')
 
-    def ping(self):
-        # TODO: maybe send real data here?
-        stats = OrderedDict([
-            ('isUploading', 0),
-            ('isPlaying', 0),
-            ('isDownloading', 0),
-            ('panelSelectedTab', 0),
-            ('animation', 0)
-        ])
-        data = OrderedDict([['token', self.__token], ['stats', stats]])
-        try:
-            self._send_action('CheckEvents', data)
-        except KeyError:
-            # This can happen if we send too much data in so quick time, nothing to worry about
-            pass
-
     @property
     def path(self):
         return '/'
@@ -321,20 +302,6 @@ class Chomik(ChomikFolder):
         if folder is None:
             folder = self
         assert isinstance(folder, ChomikFolder)
-
-        if not self.chomik_id2:
-            # Obtain different account ID
-            # TODO/Warning: to get proper response, we need be logged in and send ping, which
-            # is done currently after login. If this method ever fail in future, just call ping() here.
-            data = {
-                'chomikName': self.name,
-                'folderId': folder.folder_id
-            }
-            resp = self._send_web_action('chomikbox/DownloadFolderChomikBox', data)
-
-            # chomik://files/:chomik_id/folder_id
-            r = re.match('chomik:\/\/files\/:(\d+)\/\d+', resp['chomikBoxUrl'])
-            self.chomik_id2 = int(r.group(1))
 
         free_files = {}
 
@@ -363,8 +330,7 @@ class Chomik(ChomikFolder):
         def dwn_req_data(data):
             return OrderedDict([['token', self.__token], ['sequence', {'stamp': 0, 'part': 0, 'count': 1}], ['disposition', 'download'], ['list', {'DownloadReqEntry': data}]])
 
-        id_ = '{}/{}'.format(self.chomik_id2, folder.folder_id)
-        a_data = dwn_req_data(OrderedDict([['id', id_], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
+        a_data = dwn_req_data(OrderedDict([['id', '/'+self.name+folder.path], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
         self.logger.debug('Loading files from folder {id}'.format(id=folder.folder_id))
         resp = self._send_action('Download', a_data)
 
