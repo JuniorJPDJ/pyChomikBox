@@ -152,14 +152,6 @@ class ChomikFolder(object):
     def __iter__(self):
         return iter(self.list())
 
-    @property
-    def _tree(self):
-        last, tree = self, ''
-        while last:
-            tree = '/' + last.name + tree
-            last = last.parent_folder
-        return tree
-
     def files_list(self, only_downloadable=False):
         return self.chomik.files_list(only_downloadable, self)
 
@@ -338,7 +330,7 @@ class Chomik(ChomikFolder):
         def dwn_req_data(data):
             return OrderedDict([['token', self.__token], ['sequence', {'stamp': 0, 'part': 0, 'count': 1}], ['disposition', 'download'], ['list', {'DownloadReqEntry': data}]])
 
-        a_data = dwn_req_data(OrderedDict([['id', folder._tree], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
+        a_data = dwn_req_data(OrderedDict([['id', '/'+self.name+folder.path], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
         self.logger.debug('Loading files from folder {id}'.format(id=folder.folder_id))
         resp = self._send_action('Download', a_data)
 
