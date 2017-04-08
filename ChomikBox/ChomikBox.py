@@ -229,7 +229,7 @@ class Chomik(ChomikFolder):
 
         self.__password = password
         self.sess = requests.session() if requests_session is None else requests_session
-        self.__token, self.chomik_id, self.chomik_id2 = '', 0, 0
+        self.__token, self.chomik_id = '', 0
         self._last_action = datetime.now()
         self._folder_cache = {}
         self.logger = logging.getLogger('ChomikBox.Chomik.{}'.format(name))
@@ -250,7 +250,7 @@ class Chomik(ChomikFolder):
         headers = {'SOAPAction': 'http://chomikuj.pl/IChomikBoxService/{}'.format(action), 'User-Agent': 'Mozilla/5.0',
                    'Content-Type': 'text/xml;charset=utf-8', 'Accept-Language': 'en-US,*'}
         data = ChomikSOAP.pack(action, data)
-        resp = self.sess.post('http://box.chomikuj.pl/services/ChomikBoxService.svc', data, headers=headers)
+        resp = self.sess.post('https://box.chomikuj.pl/services/ChomikBoxService.svc', data, headers=headers)
         resp = ChomikSOAP.unpack(resp.text)['{}Response'.format(action)]['{}Result'.format(action)]
         if 'a:hamsterName' in resp and isinstance(resp['a:hamsterName'], ustr):
             self.name = resp['a:hamsterName']
@@ -271,7 +271,7 @@ class Chomik(ChomikFolder):
     def _send_web_action(self, action, data):
         self.logger.debug('Sending web action: "{}"'.format(action))
         headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded', 'Accept-Language': 'en-US,*'}
-        resp = self.sess_web.post('http://chomikuj.pl/action/{}'.format(action), data=data, headers=headers)
+        resp = self.sess_web.post('https://chomikuj.pl/action/{}'.format(action), data=data, headers=headers)
         try:
             return resp.json()
         except ValueError:
@@ -287,7 +287,7 @@ class Chomik(ChomikFolder):
 
         # Web login
         self.sess_web = requests.session()
-        self.sess_web.get('http://box.chomikuj.pl/chomik/chomikbox/LoginFromBox', params={'t':self.__token, 'returnUrl':self.name})
+        self.sess_web.get('https://chomikuj.pl/chomik/chomikbox/LoginFromBox', params={'t':self.__token, 'returnUrl':self.name})
 
     def logout(self):
         self._send_action('Logout', {'token': self.__token})
