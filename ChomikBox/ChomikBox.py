@@ -80,14 +80,14 @@ class ChomikSOAP(object):
 
 
 class ChomikFile(object):
-    def __init__(self, chomik, name, file_id, parent_folder, url=None):
+    def __init__(self, chomik, name, file_id, parent_folder, size, url=None):
         assert isinstance(chomik, Chomik)
         assert isinstance(name, ustr)
         assert isinstance(parent_folder, ChomikFolder)
         assert isinstance(url, ustr) or url is None
 
         self.chomik, self.name, self.file_id = chomik, name, int(file_id)
-        self.parent_folder, self.url = parent_folder, url
+        self.parent_folder, self.size, self.url = parent_folder, size, url
 
     def __repr__(self):
         return '<ChomikBox.ChomikFile: "{p}"{i}({c})>'.format(p=self.path, i=' ' if self.downloadable else '-not downloadable- ', c=self.chomik.name)
@@ -118,7 +118,7 @@ class ChomikFile(object):
 
 
 class ChomikFolder(object):
-    def __init__(self, chomik, name, folder_id, parent_folder, hidden, adult, gallery_view):
+    def __init__(self, chomik, name, folder_id, parent_folder, hidden, adult, gallery_view, password):
         assert isinstance(chomik, Chomik)
         assert isinstance(name, ustr)
         assert isinstance(parent_folder, ChomikFolder) or parent_folder is None
@@ -128,9 +128,10 @@ class ChomikFolder(object):
 
         self.chomik, self.folder_id, self.name = chomik, int(folder_id), name
         self.parent_folder, self.hidden, self.adult, self.gallery_view = parent_folder, hidden, adult, gallery_view
+        self.password = password
 
     @classmethod
-    def cache(cls, chomik, name, folder_id, parent_folder, hidden, adult, gallery_view):
+    def cache(cls, chomik, name, folder_id, parent_folder, hidden, adult, gallery_view, password):
         assert isinstance(chomik, Chomik)
         folder_id = int(folder_id)
         if folder_id in chomik._folder_cache:
@@ -141,8 +142,9 @@ class ChomikFolder(object):
             assert isinstance(gallery_view, bool)
             fol = chomik._folder_cache[folder_id]
             fol.name, fol.parent_folder, fol.hidden, fol.adult, fol.gallery_view = name, parent_folder, hidden, adult, gallery_view
+            fol.password = password
         else:
-            fol = cls(chomik, name, folder_id, parent_folder, hidden, adult, gallery_view)
+            fol = cls(chomik, name, folder_id, parent_folder, hidden, adult, gallery_view, password)
             chomik._folder_cache[folder_id] = fol
         return fol
 
@@ -208,6 +210,9 @@ class ChomikFolder(object):
     def remove(self, force=False):
         self.chomik.remove_folder(self, force)
 
+    def modify(self, params):
+        return self.chomik.modify_folder(self, params)
+
     def set_hidden(self, hidden):
         return self.chomik.set_folder_hidden(self, hidden)
 
@@ -216,6 +221,9 @@ class ChomikFolder(object):
 
     def set_gallery_view(self, gallery_view):
         return self.chomik.set_folder_gallery_view(self, gallery_view)
+
+    def set_password(self, password):
+        return self.chomik.set_folder_password(self, password)
 
     def upload_file(self, file_like_obj, name=None, progress_callback=None):
         return self.chomik.upload_file(file_like_obj, name, progress_callback, self)
@@ -234,7 +242,7 @@ class Chomik(ChomikFolder):
         self._folder_cache = {}
         self.logger = logging.getLogger('ChomikBox.Chomik.{}'.format(name))
         # TODO: init adult & gallery_view properly
-        ChomikFolder.__init__(self, self, name, 0, None, False, False, False)
+        ChomikFolder.__init__(self, self, name, 0, None, False, False, False, None)
 
     def __repr__(self):
         return '<ChomikBox.Chomik: {n}>'.format(n=self.name)
@@ -307,7 +315,7 @@ class Chomik(ChomikFolder):
 
         def file(data):
             url = data['url'] if isinstance(data['url'], ustr) else None
-            f = ChomikFile(self, data['name'], data['id'], folder, url)
+            f = ChomikFile(self, data['name'], data['id'], folder, int(data['size']), url)
             if url is None:
                 for a in data['agreementInfo']['AgreementInfo']:
                     if 'name' in a and 'cost' in a and a['cost'] == '0':
@@ -359,7 +367,8 @@ class Chomik(ChomikFolder):
             hidden = True if data['hidden'] == 'true' else False
             adult = True if data['adult'] == 'true' else False
             gallery_view = True if data['view']['gallery'] == 'true' else False
-            return ChomikFolder.cache(self, data['name'], data['id'], folder, hidden, adult, gallery_view)
+            password = data['password'] if data['passwd'] == 'true' else None
+            return ChomikFolder.cache(self, data['name'], data['id'], folder, hidden, adult, gallery_view, password)
 
         def folders_gen(data):
             if 'FolderInfo' in data:
@@ -402,7 +411,7 @@ class Chomik(ChomikFolder):
         data = OrderedDict([['token', self.__token], ['newFolderId', parent_folder.folder_id], ['name', name]])
         data = self._send_action('AddFolder', data)
 
-        return ChomikFolder(self, name, data['a:folderId'], parent_folder, False, False, False)
+        return ChomikFolder(self, name, data['a:folderId'], parent_folder, False, False, False, None)
 
     def rename_folder(self, name, folder):
         assert isinstance(name, ustr)
@@ -438,6 +447,19 @@ class Chomik(ChomikFolder):
         folder.parent_folder = None
         del(self._folder_cache[folder.folder_id])
 
+    def modify_folder(self, folder, params):
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+        assert isinstance(params, dict)
+
+        data = OrderedDict([
+            ('token', self.__token),
+            ('folderId', folder.folder_id)
+        ])
+        data.update(params)
+        return self._send_action('ModifyFolder', data)
+
     def set_folder_hidden(self, folder, hidden):
         assert isinstance(hidden, bool)
         if isinstance(folder, Chomik):
@@ -445,17 +467,9 @@ class Chomik(ChomikFolder):
         assert isinstance(folder, ChomikFolder)
 
         self.logger.debug('Setting folder {f} hidden status to {h}'.format(f=folder.folder_id, h=hidden))
-        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['hidden', int(hidden)]])
-        data = self._send_action('ModifyFolder', data)
-        data = data['a:folderDetails']['hidden']
-        data = True if data == 'true' else False
-
-        folder.hidden = data
-        if hidden == data:
-            folder.hidden = hidden
-            return True
-        else:
-            return False
+        data = self.modify_folder(folder, {'hidden': int(hidden)})
+        folder.hidden = True if data['a:folderDetails']['hidden'] == 'true' else False
+        return folder.hidden == hidden
 
     def set_folder_gallery_view(self, folder, gallery_view):
         assert isinstance(gallery_view, bool)
@@ -464,17 +478,9 @@ class Chomik(ChomikFolder):
         assert isinstance(folder, ChomikFolder)
 
         self.logger.debug('Setting folder {f} gallery_view status to {h}'.format(f=folder.folder_id, h=gallery_view))
-        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['view', OrderedDict([('gallery', int(gallery_view))])]])
-        data = self._send_action('ModifyFolder', data)
-        data = data['a:folderDetails']['view']['gallery']
-        data = True if data == 'true' else False
-
-        folder.gallery_view = data
-        if gallery_view == data:
-            folder.gallery_view = gallery_view
-            return True
-        else:
-            return False
+        data = self.modify_folder(folder, {'view': {'gallery': int(gallery_view)}})
+        folder.gallery_view = True if data['a:folderDetails']['view']['gallery'] == 'true' else False
+        return folder.gallery_view == gallery_view
 
     # TODO: set (cached?) child folders adult param (chomikuj do this)
     def set_folder_adult(self, folder, adult):
@@ -484,17 +490,23 @@ class Chomik(ChomikFolder):
         assert isinstance(folder, ChomikFolder)
 
         self.logger.debug('Setting folder {f} adult status to {h}'.format(f=folder.folder_id, h=adult))
-        data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['adult', int(adult)]])
-        data = self._send_action('ModifyFolder', data)
-        data = data['a:folderDetails']['adult']
-        data = True if data == 'true' else False
+        data = self.modify_folder(folder, {'adult': int(adult)})
+        folder.adult = True if data['a:folderDetails']['adult'] == 'true' else False
+        return folder.adult == adult
 
-        folder.adult = data
-        if adult == data:
-            folder.adult = adult
-            return True
-        else:
-            return False
+    def set_folder_password(self, folder, password):
+        if isinstance(folder, Chomik):
+            raise UnsupportedOperation
+        assert isinstance(folder, ChomikFolder)
+        if password and len(password) > 200:
+            raise ValueError('Password is too long')
+        if password == '':
+            password = None
+
+        self.logger.debug('Setting folder {f} password to {h}'.format(f=folder.folder_id, h=password))
+        data = self.modify_folder(folder, {'passwd': int(password is not None), 'password': password})
+        folder.password = data['a:folderDetails']['password'] if data['a:folderDetails']['passwd'] == 'true' else None
+        return folder.password == password
 
     def rename_file(self, name, description, file):
         assert isinstance(name, ustr)
