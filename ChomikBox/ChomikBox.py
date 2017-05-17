@@ -140,7 +140,6 @@ class ChomikFolder(object):
             assert isinstance(hidden, bool)
             assert isinstance(adult, bool)
             assert isinstance(gallery_view, bool)
-            assert isinstance(password, ustr)
             fol = chomik._folder_cache[folder_id]
             fol.name, fol.parent_folder, fol.hidden, fol.adult, fol.gallery_view = name, parent_folder, hidden, adult, gallery_view
             fol.password = password
