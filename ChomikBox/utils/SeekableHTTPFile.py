@@ -59,7 +59,11 @@ class SeekableHTTPFile(IOBase):
         elif whence == 2:
             self._pos = self.len
         self._pos += offset
-        self._r.close()
+        if self._r is not None:
+            self._r.close()
+        elif hasattr(self._r, 'raw'):
+            if hasattr(self._r.raw, 'closed') and not self._r.raw.closed:
+                self._r.close()
         return self._pos
 
     def read(self, amount=-1):
