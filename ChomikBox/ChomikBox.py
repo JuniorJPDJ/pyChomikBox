@@ -3,7 +3,6 @@ from __future__ import unicode_literals
 import logging
 import sys
 from collections import OrderedDict
-from contextlib import closing
 from datetime import datetime
 from hashlib import md5
 
@@ -19,6 +18,7 @@ from .utils.SeekableHTTPFile import SeekableHTTPFile
 CHOMIKBOX_VERSION = '2.0.8.2'
 
 # TODO: speed limits for downloader and uploader
+# TODO: function to refresh file url (reopen file?)
 
 if sys.version_info >= (3, 0):
     # noinspection PyUnresolvedReferences
@@ -29,6 +29,9 @@ if sys.version_info >= (3, 0):
 
     def dict_iteritems(d):
         return d.items()
+
+    # noinspection PyCompatibility
+    from urllib.parse import quote_plus
 else:
     # noinspection PyUnresolvedReferences
     ustr = unicode
@@ -39,6 +42,9 @@ else:
     def dict_iteritems(d):
         # noinspection PyCompatibility
         return d.iteritems()
+
+    # noinspection PyUnresolvedReferences
+    from urllib import quote_plus
 
 
 class SendActionFailedException(Exception):
@@ -230,13 +236,14 @@ class ChomikFolder(object):
 
 
 class Chomik(ChomikFolder):
-    def __init__(self, name, password, requests_session=None):
+    def __init__(self, name, password, requests_session=None, ssl=True):
         assert isinstance(name, ustr)
         assert isinstance(password, ustr)
         assert isinstance(requests_session, requests.Session) or requests_session is None
 
         self.__password = password
         self.sess = requests.session() if requests_session is None else requests_session
+        self.ssl = ssl
         self.__token, self.chomik_id = '', 0
         self._last_action = datetime.now()
         self._folder_cache = {}
@@ -258,7 +265,7 @@ class Chomik(ChomikFolder):
         headers = {'SOAPAction': 'http://chomikuj.pl/IChomikBoxService/{}'.format(action), 'User-Agent': 'Mozilla/5.0',
                    'Content-Type': 'text/xml;charset=utf-8', 'Accept-Language': 'en-US,*'}
         data = ChomikSOAP.pack(action, data)
-        resp = self.sess.post('https://box.chomikuj.pl/services/ChomikBoxService.svc', data, headers=headers)
+        resp = self.sess.post('http{}://box.chomikuj.pl/services/ChomikBoxService.svc'.format('s' if self.ssl else ''), data, headers=headers)
         resp = ChomikSOAP.unpack(resp.text)['{}Response'.format(action)]['{}Result'.format(action)]
         if 'a:hamsterName' in resp and isinstance(resp['a:hamsterName'], ustr):
             self.name = resp['a:hamsterName']
@@ -279,7 +286,7 @@ class Chomik(ChomikFolder):
     def _send_web_action(self, action, data):
         self.logger.debug('Sending web action: "{}"'.format(action))
         headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/x-www-form-urlencoded', 'Accept-Language': 'en-US,*'}
-        resp = self.sess_web.post('https://chomikuj.pl/action/{}'.format(action), data=data, headers=headers)
+        resp = self.sess_web.post('http{}://chomikuj.pl/action/{}'.format('s' if self.ssl else '', action), data=data, headers=headers)
         try:
             return resp.json()
         except ValueError:
@@ -294,8 +301,9 @@ class Chomik(ChomikFolder):
         self.logger.debug('Logged in with token {}'.format(self.__token))
 
         # Web login
+        # TODO: add ability to pass sess_web as parameter
         self.sess_web = requests.session()
-        self.sess_web.get('https://chomikuj.pl/chomik/chomikbox/LoginFromBox', params={'t':self.__token, 'returnUrl':self.name})
+        self.sess_web.get('http{}://chomikuj.pl/chomik/chomikbox/LoginFromBox'.format('s' if self.ssl else ''), params={'t':self.__token, 'returnUrl':self.name})
 
     def logout(self):
         self._send_action('Logout', {'token': self.__token})
@@ -338,7 +346,7 @@ class Chomik(ChomikFolder):
         def dwn_req_data(data):
             return OrderedDict([['token', self.__token], ['sequence', {'stamp': 0, 'part': 0, 'count': 1}], ['disposition', 'download'], ['list', {'DownloadReqEntry': data}]])
 
-        a_data = dwn_req_data(OrderedDict([['id', '/'+self.name+folder.path], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
+        a_data = dwn_req_data(OrderedDict([['id', quote_plus('/{}{}'.format(self.name, folder.path), '()/').replace('%', '*')], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
         self.logger.debug('Loading files from folder {id}'.format(id=folder.folder_id))
         resp = self._send_action('Download', a_data)
 
@@ -354,7 +362,7 @@ class Chomik(ChomikFolder):
             files.extend(files_gen(self._send_action('Download', dwn_req_data(a_data))))
 
         if only_downloadable:
-            files = list(filter(lambda x: not x.downloadable, files))
+            files = list(filter(lambda x: x.downloadable, files))
 
         return files
 
@@ -564,7 +572,6 @@ class Chomik(ChomikFolder):
             return True
         return False
 
-
     def upload_file(self, file_like_obj, name=None, progress_callback=None, folder=None):
         if name is None:
             name = file_like_obj.name
@@ -633,7 +640,7 @@ class ChomikUploader(object):
 
         try:
             self.chomik.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=self.name, f=self.folder.folder_id))
-            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
+            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.ssl else '', server=self.server), data=monitor, headers=headers)
         except Exception as e:
             if isinstance(e, self.UploadPaused):
                 self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
@@ -671,7 +678,7 @@ class ChomikUploader(object):
         self.paused = False
 
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = self.chomik.sess.get('http://{server}/resume/check/?key={key}'.format(server=self.server, key=self.key), headers=headers)
+        resp = self.chomik.sess.get('http{}://{server}/resume/check/?key={key}'.format('s' if self.ssl else '', server=self.server, key=self.key), headers=headers)
         resp = xmltodict.parse(resp.content)['resp']
 
         resume_from = int(resp['@file_size'])
@@ -687,7 +694,7 @@ class ChomikUploader(object):
 
         self.chomik.logger.debug('Resumed uploading file "{n}" to folder {f} from {b} bytes'.format(n=self.name, f=self.folder.folder_id, b=resume_from))
         try:
-            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
+            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.ssl else '', server=self.server), data=monitor, headers=headers)
         except self.UploadPaused:
             self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
             return 'paused'
@@ -728,7 +735,7 @@ class ChomikDownloader(object):
         self.paused = True
 
     def __dwn(self, headers):
-        with closing(self.chomik.sess.get(self.chomik_file.url, stream=True, headers=headers)) as resp:
+        with self.chomik.sess.get(self.chomik_file.url, stream=True, headers=headers) as resp:
             if resp.status_code in (200, 206):
                 for data in resp.iter_content(self.chunk_size):
                     self.save_file.write(data)

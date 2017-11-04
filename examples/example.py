@@ -20,16 +20,16 @@ p = argparse.ArgumentParser()
 p.add_argument('login', help="Chomikuj login/email")
 p.add_argument('password', help="Chomikuj password")
 p.add_argument('upload_file', help="Path to file to upload")
-p.add_argument('dwn_file', help="Path to file where to download")
+#p.add_argument('dwn_file', help="Path to file where to download")
 args = p.parse_args()
 
 logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s][%(levelname)s]: %(name)s | %(message)s', datefmt='%H:%M:%S')
 s = requests.session()
 # s.proxies = {'http': '127.0.0.1:8080'} # used for sniffing requests with burp suite
-c = Chomik(args.login, args.password, s)
+c = Chomik(args.login, args.password, requests_session=s)
 c.login()
 
-fold = c.get('testing')
+fold = c.get('upload')
 
 
 class ProgressCallback(object):
@@ -70,13 +70,13 @@ if uploader.paused:
     uploader.resume()
 callback.finish_callback(uploader)
 
-with open(args.dwn_file + '.dwn', 'wb') as f:
-    file = fold.get_file(name)
-    callback = ProgressCallback()
-    downloader = file.download(f, callback.progress_callback)
-    downloader.start()
-    if downloader.paused:
-        downloader.resume()
-    callback.finish_callback(downloader)
+#with open(args.dwn_file + '.dwn', 'wb') as f:
+#    file = fold.get_file(name)
+#    callback = ProgressCallback()
+#    downloader = file.download(f, callback.progress_callback)
+#    downloader.start()
+#    if downloader.paused:
+#        downloader.resume()
+#    callback.finish_callback(downloader)
 
 c.logout()

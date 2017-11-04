@@ -3,22 +3,26 @@ import cgi
 
 import requests
 
+# TODO: fallback file name from url
+
 
 class SeekableHTTPFile(IOBase):
     # a bit based on https://github.com/valgur/pyhttpio
-    def __init__(self, url, name=None, requests_session=None):
+    def __init__(self, url, name=None, requests_session=None, timeout=30):
         IOBase.__init__(self)
         self.url = url
         self.sess = requests_session if requests_session is not None else requests.session()
         self._seekable = False
-        f = self.sess.head(url, headers={'Range': 'bytes=0-'})
+        self.timeout = timeout
+        f = self.sess.head(url, headers={'Range': 'bytes=0-'}, timeout=timeout)
         if f.status_code == 206 and 'Content-Range' in f.headers:
             self._seekable = True
         self.len = int(f.headers["Content-Length"])
         if name is None:
             if "Content-Disposition" in f.headers:
                 value, params = cgi.parse_header(f.headers["Content-Disposition"])
-                self.name = params["filename"]
+                if "filename" in params:
+                    self.name = params["filename"]
         else:
             self.name = name
         f.close()
@@ -44,10 +48,10 @@ class SeekableHTTPFile(IOBase):
         if self._r is not None:
             self._r.close()
         if self._seekable:
-            self._r = self.sess.get(self.url, headers={'Range': 'bytes={}-'.format(self._pos)}, stream=True)
+            self._r = self.sess.get(self.url, headers={'Range': 'bytes={}-'.format(self._pos)}, stream=True, timeout=30)
         else:
             self._pos = 0
-            self._r = self.sess.get(self.url, stream=True)
+            self._r = self.sess.get(self.url, stream=True, timeout=self.timeout)
 
     def seek(self, offset, whence=0):
         if not self.seekable():
