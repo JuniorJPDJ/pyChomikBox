@@ -6,7 +6,6 @@ from collections import OrderedDict
 from datetime import datetime
 from hashlib import md5
 
-import re
 import requests
 import xmltodict
 import os.path
@@ -17,8 +16,11 @@ from .utils.SeekableHTTPFile import SeekableHTTPFile
 
 CHOMIKBOX_VERSION = '2.0.8.2'
 
+# TODO: setup.py + pip package
 # TODO: speed limits for downloader and uploader
 # TODO: function to refresh file url (reopen file?)
+# TODO: whole folder tree caching (as done in original ChomikBox)
+# TODO: refresh cached tree when listing folders (if needed)
 
 if sys.version_info >= (3, 0):
     # noinspection PyUnresolvedReferences
@@ -113,8 +115,8 @@ class ChomikFile(object):
     def rename(self, name, description):
         return self.chomik.rename_file(name, description, self)
 
-    def move(self, toFolder):
-        return self.chomik.move_file(self, toFolder)
+    def move(self, to_folder):
+        return self.chomik.move_file(self, to_folder)
 
     def remove(self):
         return self.chomik.remove_file(self)
@@ -303,7 +305,7 @@ class Chomik(ChomikFolder):
         # Web login
         # TODO: add ability to pass sess_web as parameter
         self.sess_web = requests.session()
-        self.sess_web.get('http{}://chomikuj.pl/chomik/chomikbox/LoginFromBox'.format('s' if self.ssl else ''), params={'t':self.__token, 'returnUrl':self.name})
+        self.sess_web.get('http{}://chomikuj.pl/chomik/chomikbox/LoginFromBox'.format('s' if self.ssl else ''), params={'t': self.__token, 'returnUrl': self.name})
 
     def logout(self):
         self._send_action('Logout', {'token': self.__token})
@@ -539,20 +541,20 @@ class Chomik(ChomikFolder):
             return True
         return False
 
-    def move_file(self, file, toFolder):
+    def move_file(self, file, to_folder):
         assert isinstance(file, ChomikFile)
-        assert isinstance(toFolder, ChomikFolder)
+        assert isinstance(to_folder, ChomikFolder)
 
-        self.logger.debug('Moving file {f} to {tf}'.format(f=file.file_id, tf=toFolder.folder_id))
+        self.logger.debug('Moving file {f} to {tf}'.format(f=file.file_id, tf=to_folder.folder_id))
         data = {
             'ChomikName': self.name,
             'FolderId': file.parent_folder.folder_id,
             'FileId':   file.file_id,
-            'FolderTo': toFolder.folder_id
+            'FolderTo': to_folder.folder_id
         }
         resp = self._send_web_action('FileDetails/MoveFileAction', data)
         if resp and resp['IsSuccess']:
-            file.parent_folder = toFolder
+            file.parent_folder = to_folder
             return True
         return False
 
@@ -568,7 +570,7 @@ class Chomik(ChomikFolder):
         }
         resp = self._send_web_action('FileDetails/DeleteFileAction', data)
         if resp and resp['IsSuccess']:
-            del(file)
+            del file
             return True
         return False
 
@@ -640,7 +642,7 @@ class ChomikUploader(object):
 
         try:
             self.chomik.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=self.name, f=self.folder.folder_id))
-            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.ssl else '', server=self.server), data=monitor, headers=headers)
+            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.chomik.ssl else '', server=self.server), data=monitor, headers=headers)
         except Exception as e:
             if isinstance(e, self.UploadPaused):
                 self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
@@ -648,7 +650,7 @@ class ChomikUploader(object):
             else:
                 self.chomik.logger.debug('Error {e} occurred during upload of file "{n}"'.format(e=e, n=self.name))
                 attempt = 1
-                while attempts >= attempt or attempts == -1:
+                while attempts == -1 or attempts >= attempt:
                     try:
                         self.chomik.logger.debug('Resuming failed upload of file "{n}"'.format(n=self.name))
                         return self.resume()
@@ -678,7 +680,7 @@ class ChomikUploader(object):
         self.paused = False
 
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = self.chomik.sess.get('http{}://{server}/resume/check/?key={key}'.format('s' if self.ssl else '', server=self.server, key=self.key), headers=headers)
+        resp = self.chomik.sess.get('http{}://{server}/resume/check/?key={key}'.format('s' if self.chomik.ssl else '', server=self.server, key=self.key), headers=headers)
         resp = xmltodict.parse(resp.content)['resp']
 
         resume_from = int(resp['@file_size'])
@@ -694,7 +696,7 @@ class ChomikUploader(object):
 
         self.chomik.logger.debug('Resumed uploading file "{n}" to folder {f} from {b} bytes'.format(n=self.name, f=self.folder.folder_id, b=resume_from))
         try:
-            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.ssl else '', server=self.server), data=monitor, headers=headers)
+            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.chomik.ssl else '', server=self.server), data=monitor, headers=headers)
         except self.UploadPaused:
             self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
             return 'paused'
