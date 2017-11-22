@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 
 import logging
+import os.path
 import sys
 from collections import OrderedDict
 from datetime import datetime
@@ -8,7 +9,6 @@ from hashlib import md5
 
 import requests
 import xmltodict
-import os.path
 from requests_toolbelt.multipart.encoder import MultipartEncoderMonitor
 
 from .PartFile import PartFile, total_len
@@ -16,7 +16,6 @@ from .utils.SeekableHTTPFile import SeekableHTTPFile
 
 CHOMIKBOX_VERSION = '2.0.8.2'
 
-# TODO: setup.py + pip package
 # TODO: speed limits for downloader and uploader
 # TODO: function to refresh file url (reopen file?)
 # TODO: whole folder tree caching (as done in original ChomikBox)
