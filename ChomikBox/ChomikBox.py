@@ -353,6 +353,7 @@ class Chomik(ChomikFolder):
             resp = self._send_action('Download', a_data)
         except SendActionFailedException as e:
             if e.action == "Download" and e.error == 'failed : requested file(s) not available':
+                # no results
                 return []
             else:
                 raise
@@ -645,9 +646,10 @@ class ChomikUploader(object):
         monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
         headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
 
+        # 's' if self.chomik.ssl else ''
         try:
             self.chomik.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=self.name, f=self.folder.folder_id))
-            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.chomik.ssl else '', server=self.server), data=monitor, headers=headers)
+            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
         except Exception as e:
             if isinstance(e, self.UploadPaused):
                 self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
@@ -685,7 +687,10 @@ class ChomikUploader(object):
         self.paused = False
 
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = self.chomik.sess.get('http{}://{server}/resume/check/?key={key}'.format('s' if self.chomik.ssl else '', server=self.server, key=self.key), headers=headers)
+
+        # 's' if self.chomik.ssl else ''
+        # TODO: find workaround for SSL handshake
+        resp = self.chomik.sess.get('http://{server}/resume/check/?key={key}'.format(server=self.server, key=self.key), headers=headers)
         resp = xmltodict.parse(resp.content)['resp']
 
         resume_from = int(resp['@file_size'])
@@ -701,7 +706,8 @@ class ChomikUploader(object):
 
         self.chomik.logger.debug('Resumed uploading file "{n}" to folder {f} from {b} bytes'.format(n=self.name, f=self.folder.folder_id, b=resume_from))
         try:
-            resp = self.chomik.sess.post('http{}://{server}/file/'.format('s' if self.chomik.ssl else '', server=self.server), data=monitor, headers=headers)
+            # 's' if self.chomik.ssl else ''
+            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
         except self.UploadPaused:
             self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
             return 'paused'
