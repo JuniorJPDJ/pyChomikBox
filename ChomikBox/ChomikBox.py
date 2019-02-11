@@ -349,7 +349,13 @@ class Chomik(ChomikFolder):
 
         a_data = dwn_req_data(OrderedDict([['id', quote_plus('/{}{}'.format(self.name, folder.path), '()/').replace('%', '*')], ['agreementInfo', {'AgreementInfo': {'name': 'own'}}]]))
         self.logger.debug('Loading files from folder {id}'.format(id=folder.folder_id))
-        resp = self._send_action('Download', a_data)
+        try:
+            resp = self._send_action('Download', a_data)
+        except SendActionFailedException as e:
+            if e.action == "Download" and e.error == 'failed : requested file(s) not available':
+                return []
+            else:
+                raise
 
         files = list(files_gen(resp))
 
