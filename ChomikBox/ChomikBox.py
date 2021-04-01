@@ -594,16 +594,21 @@ class Chomik(ChomikFolder):
         data = OrderedDict([['token', self.__token], ['folderId', folder.folder_id], ['fileName', name]])
         data = self._send_action('UploadToken', data)
 
+        web_upload_resp = self.chomik._send_web_action('Upload/GetUrl', {
+            'accountname': self.name,
+            'folderid': folder.folder_id
+        })
+        
         key, stamp, server = data['a:key'], data['a:stamp'], data['a:server']
 
-        return ChomikUploader(self, folder, file_like_obj, name, server, key, stamp, progress_callback)
+        return ChomikUploader(self, folder, file_like_obj, name, server, key, stamp, progress_callback, web_upload_resp)
 
 
 class ChomikUploader(object):
     class UploadPaused(Exception):
         pass
 
-    def __init__(self, chomik, folder, file, name, server, key, stamp, progress_callback=None):
+    def __init__(self, chomik, folder, file, name, server, key, stamp, progress_callback=None, web_upload=None):
         assert hasattr(file, 'read') and hasattr(file, 'tell') and hasattr(file, 'seek')
         assert isinstance(folder, ChomikFolder)
         assert callable(progress_callback)
@@ -619,18 +624,25 @@ class ChomikUploader(object):
         self.upload_size, self.bytes_uploaded = total_len(file), 0
         self.__start_pos, self.__part_size = 0, self.upload_size
         self.progress_callback = progress_callback
+        self.web_upload = web_upload
 
     def __callback(self, monitor):
         self.bytes_uploaded = self.__start_pos + (monitor.bytes_read - (monitor.len - self.__part_size))
         if self.progress_callback is not None:
             self.progress_callback(self)
         if self.paused:
-            raise self.UploadPaused
+            if self.bytes_uploaded == self.upload_size:
+                self.finished = True
+            # else:
+                # raise self.UploadPaused
 
     def pause(self):
         self.paused = True
 
     def start(self, attempts=0):
+        
+        self.chomik.logger.debug('Uploader.start()')
+        
         # attempts = -1 for infinite
         assert isinstance(attempts, int)
 
@@ -640,48 +652,49 @@ class ChomikUploader(object):
             raise UploadException('Tried to start already started upload')
         self.started = True
 
-        data = OrderedDict([['chomik_id', ustr(self.chomik.chomik_id)], ['folder_id', ustr(self.folder.folder_id)],
-                            ['key', self.key], ['time', self.stamp], ['client', 'ChomikBox-'+CHOMIKBOX_VERSION], ['locale', 'PL'],
-                            ['file', (self.name, self.file)]])
+        data = { 'files[]': (self.name, self.file, 'application/octet-stream') }
         monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
         headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
 
-        # 's' if self.chomik.ssl else ''
         try:
-            self.chomik.logger.debug('Started uploading file "{n}" to folder {f}'.format(n=self.name, f=self.folder.folder_id))
-            resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
+            self.chomik.logger.debug('Uploader.start(): Started uploading file "{n}" to folder {f}'.format(n=self.name, f=self.folder.folder_id))
+            resp = self.chomik.sess_web.post(self.web_upload['Url'], data=monitor, headers=headers)
         except Exception as e:
+            # TODO: Connection Erorr handling
+            # Unexpected error: <class 'requests.exceptions.ConnectionError'>
+
             if isinstance(e, self.UploadPaused):
-                self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
+                self.chomik.logger.debug('Uploader.start(): Upload of file "{n}" paused'.format(n=self.name))
                 return 'paused'
             else:
-                self.chomik.logger.debug('Error {e} occurred during upload of file "{n}"'.format(e=e, n=self.name))
+                self.chomik.logger.debug('Uploader.start(): Error {e} occurred during upload of file "{n}"'.format(e=e, n=self.name))
                 attempt = 1
                 while attempts == -1 or attempts >= attempt:
                     try:
-                        self.chomik.logger.debug('Resuming failed upload of file "{n}"'.format(n=self.name))
+                        self.chomik.logger.debug('Uploader.start(): Resuming failed upload of file "{n}"'.format(n=self.name))
                         return self.resume()
                     except Exception as ex:
                         e = ex
-                        self.chomik.logger.debug('Error {e} occurred during upload of file "{n}"'.format(e=ex, n=self.name))
+                        self.chomik.logger.debug('Uploader.start(): Error {e} occurred during upload of file "{n}"'.format(e=ex, n=self.name))
                         attempt += 1
                 else:
                     raise e
         else:
-            self.chomik.logger.debug('Upload of file "{n}" finished'.format(n=self.name))
-            resp = xmltodict.parse(resp.content)['resp']
-            if resp['@res'] != '1':
-                if '@errorMessage' in resp:
-                    raise UploadException(resp['@res'], resp['@errorMessage'])
-                else:
-                    raise UploadException(resp['@res'])
-            if '@fileid' not in resp:
-                raise UploadException
+            self.chomik.logger.debug('Uploader.start(): Upload of file "{n}" finished'.format(n=self.name))        
+            resp = resp.json()
 
+            if 'fileId' not in resp['files'][0]:
+                raise UploadException('File ID is missing in upload response.')
+                        
+            self.paused = False
             self.finished = True
-            return resp['@fileid']
+
+            return resp['files'][0]['fileId']
 
     def resume(self):
+        
+        self.chomik.logger.debug('Uploader: Resume')
+        
         if self.finished:
             raise UploadException('Tried to resume finished upload')
         self.paused = False
@@ -691,8 +704,17 @@ class ChomikUploader(object):
         # 's' if self.chomik.ssl else ''
         # TODO: find workaround for SSL handshake
         resp = self.chomik.sess.get('http://{server}/resume/check/?key={key}'.format(server=self.server, key=self.key), headers=headers)
+        # TODO: Resume - check if file is already uploaded (check RESP code)
+        # res: -31 - RESUME KEY does not exist
+        # res: 1 - correct RESUME response
         resp = xmltodict.parse(resp.content)['resp']
-
+        if resp['@res'] != '1':
+            if resp['@res'] == '-31':
+                raise UploadException('-31: Resume Key does not exist')
+            if '@errorMessage' in resp:
+                raise UploadException(resp['@res'], resp['@errorMessage'])
+            else:
+                raise UploadException(resp['@res'])
         resume_from = int(resp['@file_size'])
         part = PartFile(self.file, resume_from)
         self.__start_pos = resume_from
@@ -704,15 +726,15 @@ class ChomikUploader(object):
         monitor = MultipartEncoderMonitor.from_fields(fields=data, callback=self.__callback)
         headers = {'Content-Type': monitor.content_type, 'User-Agent': 'Mozilla/5.0'}
 
-        self.chomik.logger.debug('Resumed uploading file "{n}" to folder {f} from {b} bytes'.format(n=self.name, f=self.folder.folder_id, b=resume_from))
+        self.chomik.logger.debug('Uploader.resume(): Resumed uploading file "{n}" to folder {f} from {b} bytes'.format(n=self.name, f=self.folder.folder_id, b=resume_from))
         try:
             # 's' if self.chomik.ssl else ''
             resp = self.chomik.sess.post('http://{server}/file/'.format(server=self.server), data=monitor, headers=headers)
         except self.UploadPaused:
-            self.chomik.logger.debug('Upload of file "{n}" paused'.format(n=self.name))
+            self.chomik.logger.debug('Uploader.resume(): Upload of file "{n}" paused'.format(n=self.name))
             return 'paused'
         else:
-            self.chomik.logger.debug('Upload of file "{n}" finished'.format(n=self.name))
+            self.chomik.logger.debug('Uploader.resume(): Upload of file "{n}" finished'.format(n=self.name))
 
             resp = xmltodict.parse(resp.content)['resp']
             if resp['@res'] != '1':
