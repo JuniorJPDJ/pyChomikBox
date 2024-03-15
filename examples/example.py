@@ -29,8 +29,7 @@ s = requests.session()
 c = Chomik(args.login, args.password, requests_session=s)
 c.login()
 
-fold = c.get('upload')
-
+upload_folder = c.get('test')
 
 class ProgressCallback(object):
     def __init__(self):
@@ -63,15 +62,16 @@ class ProgressCallback(object):
 
 name = os.path.basename(args.upload_file)
 callback = ProgressCallback()
-uploader = fold.upload_file(open(args.upload_file, 'rb'), name, callback.progress_callback)
+uploader = upload_folder.upload_file(open(args.upload_file, 'rb'), name, callback.progress_callback)
 uploader.start()
+time.sleep(1)
 if uploader.paused:
     time.sleep(1)
     uploader.resume()
 callback.finish_callback(uploader)
 
 #with open(args.dwn_file + '.dwn', 'wb') as f:
-#    file = fold.get_file(name)
+#    file = upload_folder.get_file(name)
 #    callback = ProgressCallback()
 #    downloader = file.download(f, callback.progress_callback)
 #    downloader.start()

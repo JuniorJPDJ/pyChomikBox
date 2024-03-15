@@ -14,10 +14,8 @@ workers = 20
 chunk_size = 2 ** 12  # 4KiB
 max_errors_per_file = 5
 skip_hashed = True
-out_f = r'C:\Users\Junior\Nextcloud\dev\msdn\chomik.sha1'
-#paths = ['/prywatne/MSDN', '/prywatne/MSDN SVF']
-paths = ['/']
-
+out_f = r'test-chomik.sha1'
+paths = ['test']
 
 logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s][%(levelname)s]: %(name)s | %(message)s', datefmt='%H:%M:%S')
 
@@ -25,7 +23,6 @@ p = argparse.ArgumentParser()
 p.add_argument('login', help="Chomikuj login/email")
 p.add_argument('password', help="Chomikuj password")
 args = p.parse_args()
-
 
 # used for sniffing requests with burp suite
 # import requests
@@ -51,6 +48,12 @@ while folders:
         folders.remove(f)
 
 if skip_hashed:
+    try:
+        f = open(out_f, 'r')
+    except IOError:
+        # If not exists, create the file
+        f = open(out_f, 'a+')
+        f.close()
     with open(out_f, 'r') as f:
         hashed_fnames = [fname.split(' ', maxsplit=1)[1].rstrip() for fname in f if fname]
         files = [file for file in files if file.path not in hashed_fnames]
@@ -67,10 +70,9 @@ def gen_sha1(file):
         sha.update(block)
     return sha.hexdigest()
 
-
 errors = defaultdict(lambda: 0)
 
-with open(out_f, 'a', 1) as out_f:
+with open(out_f, 'a+', 1) as out_f:
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_file = {executor.submit(gen_sha1, file): file for file in files}
         for future in concurrent.futures.as_completed(future_to_file):
@@ -86,3 +88,4 @@ with open(out_f, 'a', 1) as out_f:
             else:
                 print(sha, file.path, file=out_f)
                 print(sha, file.path)
+    out_f.close()
